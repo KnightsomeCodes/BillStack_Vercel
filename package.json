@@ -1,0 +1,13 @@
+{
+  "name": "billstack",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "cors": "^2.8.6",
+    "dotenv": "^18.0.1",
+    "express": "^5.2.1",
+    "multer": "^2.4.0"
+  }
+}

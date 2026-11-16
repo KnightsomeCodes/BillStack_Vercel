@@ -17,91 +17,86 @@ function AddBillModal({ isOpen, onClose, onAddBill, initialMode = 'upload' }) {
   if (!isOpen) return null
 
   const handleFileChange = async (e) => {
-    const file = e.target.files?.[0]
-    if (!file) return
+  const file = e.target.files?.[0]
+  if (!file) return
 
-    setFileName(file.name)
-    setIsExtracting(true)
-    setExtractStatus(null)
+  setFileName(file.name)
+  setIsExtracting(true)
+  setExtractStatus(null)
 
-    const formData = new FormData()
-    formData.append('bill', file)
+  const formData = new FormData()
+  formData.append('bill', file)
 
-    try {
-      // Try /api/upload first (via Vite proxy or direct), fallback to direct port 5001 if needed
-      let response
-      try {
-        response = await fetch('/api/upload', {
-          method: 'POST',
-          body: formData
-        })
-      } catch (proxyErr) {
-        response = await fetch('http://localhost:5001/upload', {
-          method: 'POST',
-          body: formData
-        })
-      }
+  try {
+    const response = await fetch('/api/upload', {
+      method: 'POST',
+      body: formData
+    })
 
-      if (!response.ok) {
-        throw new Error(`Upload returned status ${response.status}`)
-      }
+    const result = await response.json()
 
-      const result = await response.json()
-      const ext = result.extractedData || {}
-
-      if (ext.vendor) {
-        setVendor(ext.vendor)
-      } else if (!vendor) {
-        const cleanName = file.name.split('.')[0].replace(/[-_]/g, ' ')
-        setVendor(cleanName.charAt(0).toUpperCase() + cleanName.slice(1))
-      }
-
-      if (ext.numericAmount > 0) {
-        setAmount(String(ext.numericAmount))
-      } else if (ext.totalAmount) {
-        const num = String(ext.totalAmount).replace(/[^0-9.]/g, '')
-        if (num) setAmount(num)
-      }
-
-      if (ext.category) {
-        const cat = ext.category.toLowerCase()
-        if (cat.includes('food') || cat.includes('dine') || cat.includes('rest')) setCategory('Food')
-        else if (cat.includes('groc') || cat.includes('super')) setCategory('Groceries')
-        else if (cat.includes('elec') || cat.includes('tech') || cat.includes('gadg')) setCategory('Electronics')
-        else if (cat.includes('fash') || cat.includes('cloth') || cat.includes('wear')) setCategory('Fashion')
-        else if (cat.includes('health') || cat.includes('pharm') || cat.includes('med')) setCategory('Health')
-        else if (cat.includes('trav') || cat.includes('fuel') || cat.includes('transport')) setCategory('Travel')
-        else setCategory('Other')
-      }
-
-      if (ext.date) {
-        setDate(ext.date)
-      }
-
-      if (ext.warranty && ext.warranty.trim()) {
-        setHasWarranty(true)
-        setWarrantyPeriod(ext.warranty.trim())
-      }
-
-      if (ext.returnPolicy) {
-        const parsedDays = parseInt(ext.returnPolicy.replace(/[^0-9]/g, ''), 10)
-        if (!isNaN(parsedDays) && parsedDays > 0) {
-          setReturnDays(String(parsedDays))
-        }
-      }
-
-      setExtractStatus('success')
-    } catch (err) {
-      console.warn('Backend OCR extraction unavailable, falling back to manual entry:', err.message)
-      setExtractStatus('fallback')
-      if (!vendor) {
-        const cleanName = file.name.split('.')[0].replace(/[-_]/g, ' ')
-        setVendor(cleanName.charAt(0).toUpperCase() + cleanName.slice(1))
-      }
-    } finally {
-      setIsExtracting(false)
+    if (!response.ok) {
+      throw new Error(result.error || `Upload failed (${response.status})`)
     }
+
+    const ext = result.extractedData || {}
+
+    if (ext.vendor) {
+      setVendor(ext.vendor)
+    } else if (!vendor) {
+      const cleanName = file.name.split('.')[0].replace(/[-_]/g, ' ')
+      setVendor(cleanName.charAt(0).toUpperCase() + cleanName.slice(1))
+    }
+
+    if (ext.numericAmount > 0) {
+      setAmount(String(ext.numericAmount))
+    } else if (ext.totalAmount) {
+      const num = String(ext.totalAmount).replace(/[^0-9.]/g, '')
+      if (num) setAmount(num)
+    }
+
+    if (ext.category) {
+      const cat = ext.category.toLowerCase()
+
+      if (cat.includes('food') || cat.includes('dine') || cat.includes('rest')) setCategory('Food')
+      else if (cat.includes('groc') || cat.includes('super')) setCategory('Groceries')
+      else if (cat.includes('elec') || cat.includes('tech') || cat.includes('gadg')) setCategory('Electronics')
+      else if (cat.includes('fash') || cat.includes('cloth') || cat.includes('wear')) setCategory('Fashion')
+      else if (cat.includes('health') || cat.includes('pharm') || cat.includes('med')) setCategory('Health')
+      else if (cat.includes('trav') || cat.includes('fuel') || cat.includes('transport')) setCategory('Travel')
+      else setCategory('Other')
+    }
+
+    if (ext.date) setDate(ext.date)
+
+    if (ext.warranty?.trim()) {
+      setHasWarranty(true)
+      setWarrantyPeriod(ext.warranty.trim())
+    }
+
+    if (ext.returnPolicy) {
+      const parsedDays = parseInt(ext.returnPolicy.replace(/[^0-9]/g, ''), 10)
+      if (!isNaN(parsedDays) && parsedDays > 0) {
+        setReturnDays(String(parsedDays))
+      }
+    }
+
+    setExtractStatus('success')
+
+  } catch (err) {
+    console.error('Receipt extraction failed:', err.message)
+
+    setExtractStatus('fallback')
+
+    if (!vendor) {
+      const cleanName = file.name.split('.')[0].replace(/[-_]/g, ' ')
+      setVendor(cleanName.charAt(0).toUpperCase() + cleanName.slice(1))
+    }
+
+  } finally {
+    setIsExtracting(false)
   }
+}
 
   const handleSubmit = (e) => {
     e.preventDefault()
@@ -221,7 +216,7 @@ function AddBillModal({ isOpen, onClose, onAddBill, initialMode = 'upload' }) {
                     <p className="dropzone-prompt">
                       <strong>Click to upload</strong> or drag receipt here
                     </p>
-                    <p className="dropzone-hint">Supports PNG, JPG, PDF up to 10MB</p>
+                    <p className="dropzone-hint">Supports PNG, JPG, PDF up to 4MB</p>
                   </>
                 )}
               </div>

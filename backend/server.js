@@ -1,30 +1,15 @@
-require('dotenv').config()
+require('dotenv').config({
+  path: require('path').join(__dirname, '.env')
+})
+
 const express = require('express')
-const cors = require('cors')
 const multer = require('multer')
-const path = require('path')
-const fs = require('fs')
 const { GoogleGenerativeAI } = require('@google/generative-ai')
-const vision = require('@google-cloud/vision')
 
 const app = express()
 const PORT = process.env.PORT || 5001
 
-// Setup uploads directory
-const UPLOAD_DIR = path.join(__dirname, 'uploads')
-if (!fs.existsSync(UPLOAD_DIR)) {
-  fs.mkdirSync(UPLOAD_DIR, { recursive: true })
-}
-
-// Multer storage and file filter
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
-  filename: (req, file, cb) => {
-    const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`
-    cb(null, `${uniqueSuffix}-${file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_')}`)
-  }
-})
-
+// Multer memory storage
 const fileFilter = (req, file, cb) => {
   const allowedMime = [
     'image/jpeg',
@@ -35,7 +20,11 @@ const fileFilter = (req, file, cb) => {
     'image/gif',
     'application/pdf'
   ]
-  if (allowedMime.includes(file.mimetype) || file.originalname.match(/\.(jpe?g|png|webp|gif|pdf)$/i)) {
+
+  if (
+    allowedMime.includes(file.mimetype) ||
+    /\.(jpe?g|png|webp|gif|pdf)$/i.test(file.originalname)
+  ) {
     cb(null, true)
   } else {
     cb(new Error('Invalid file type. Only JPEG, PNG, WEBP, GIF, and PDF receipts are allowed.'))
@@ -43,9 +32,9 @@ const fileFilter = (req, file, cb) => {
 }
 
 const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   fileFilter,
-  limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
+  limits: { fileSize: 4 * 1024 * 1024 }
 })
 
 // CORS configuration
@@ -57,83 +46,87 @@ const allowedOrigins = [
   process.env.FRONTEND_URL
 ].filter(Boolean)
 
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      // Allow requests with no origin (like mobile apps, curl, or same-origin requests)
-      if (!origin || allowedOrigins.includes(origin)) {
-        return callback(null, true)
-      }
-      return callback(null, true) // Permissive for local development pairs
-    },
-    credentials: true
-  })
-)
-
 app.use(express.json())
 
-// Initialize Google Cloud Vision Client safely
-let visionClient = null
-const credPath = process.env.GOOGLE_APPLICATION_CREDENTIALS
-if (credPath && fs.existsSync(credPath)) {
-  try {
-    visionClient = new vision.ImageAnnotatorClient({ keyFilename: credPath })
-    console.log('[Vision] Google Cloud Vision client initialized from credentials file.')
-  } catch (err) {
-    console.warn('[Vision] Warning: Failed to initialize Vision client from keyfile:', err.message)
+// Google Vision API configuration
+const visionApiKey = process.env.GOOGLE_VISION_API_KEY
+console.log('[Vision] API key detected:', Boolean(visionApiKey))
+
+async function performVisionOCR(buffer, mimeType) {
+  if (!visionApiKey || mimeType === 'application/pdf') {
+    return ''
   }
-} else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
-  console.warn(`[Vision] GOOGLE_APPLICATION_CREDENTIALS points to missing file: "${credPath}". Cloud Vision will be unconfigured until valid credentials are provided.`)
-} else {
-  console.log('[Vision] No GOOGLE_APPLICATION_CREDENTIALS configured. Will fallback to Gemini multimodal extraction if available.')
+
+  const response = await fetch(
+    `https://vision.googleapis.com/v1/images:annotate?key=${visionApiKey}`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        requests: [
+          {
+            image: {
+              content: buffer.toString('base64')
+            },
+            features: [
+              {
+                type: 'TEXT_DETECTION'
+              }
+            ]
+          }
+        ]
+      })
+    }
+  )
+
+  const result = await response.json()
+
+  if (!response.ok) {
+    throw new Error(result.error?.message || 'Google Vision API request failed')
+  }
+
+  return result.responses?.[0]?.fullTextAnnotation?.text || ''
 }
 
-// Initialize Gemini Client safely
-let genAI = null
+// Gemini configuration
 let geminiModel = null
+
 const geminiApiKey = process.env.GEMINI_API_KEY
 const modelName = process.env.GEMINI_MODEL || 'gemini-flash-lite-latest'
 
 if (geminiApiKey) {
   try {
-    genAI = new GoogleGenerativeAI(geminiApiKey)
+    const genAI = new GoogleGenerativeAI(geminiApiKey)
     geminiModel = genAI.getGenerativeModel({ model: modelName })
-    console.log(`[Gemini] Initialized Gemini client with model: ${modelName}`)
+
+    console.log(`[Gemini] Initialized model: ${modelName}`)
   } catch (err) {
-    console.warn('[Gemini] Warning: Failed to initialize Gemini client:', err.message)
+    console.warn('[Gemini] Initialization failed:', err.message)
   }
 } else {
-  console.warn('[Gemini] Warning: GEMINI_API_KEY is not set in environment.')
+  console.warn('[Gemini] GEMINI_API_KEY is not configured.')
 }
 
-// Health check endpoints
+// Health checks
 const getHealthStatus = () => ({
   status: 'ok',
   service: 'BillStack Backend',
   timestamp: new Date().toISOString(),
-  port: PORT,
-  visionConfigured: Boolean(visionClient),
+  visionConfigured: Boolean(visionApiKey),
   geminiConfigured: Boolean(geminiModel),
   geminiModel: modelName
 })
 
-app.get('/', (req, res) => {
-  res.json(getHealthStatus())
-})
+app.get('/', (req, res) => res.json(getHealthStatus()))
+app.get('/health', (req, res) => res.json(getHealthStatus()))
+app.get('/api/health', (req, res) => res.json(getHealthStatus()))
 
-app.get('/health', (req, res) => {
-  res.json(getHealthStatus())
-})
-
-app.get('/api/health', (req, res) => {
-  res.json(getHealthStatus())
-})
-
-// Helper to safely parse AI response JSON
+// Extract JSON from Gemini response
 function extractJsonFromText(rawText) {
   if (!rawText) return null
 
-  // 1. Try stripping markdown code fences
   const cleaned = rawText
     .replace(/```json/gi, '')
     .replace(/```/g, '')
@@ -141,35 +134,33 @@ function extractJsonFromText(rawText) {
 
   try {
     return JSON.parse(cleaned)
-  } catch (e) {
-    // 2. Try regex extraction for outermost JSON object
+  } catch {
     const match = rawText.match(/\{[\s\S]*\}/)
+
     if (match) {
       try {
         return JSON.parse(match[0])
-      } catch (innerErr) {
-        // Fallback below
+      } catch {
+        return null
       }
     }
+
     return null
   }
 }
 
-// Normalizer to align returned data with BillStack's frontend data model
+// Normalize extracted data
 function normalizeExtractedData(raw) {
   const data = raw || {}
   const rawAmount = data.totalAmount ?? data.amount ?? ''
+
   let numericAmount = 0
+
   if (typeof rawAmount === 'number') {
     numericAmount = rawAmount
   } else if (typeof rawAmount === 'string') {
-    const sanitized = rawAmount.replace(/[^0-9.-]/g, '')
-    numericAmount = parseFloat(sanitized) || 0
+    numericAmount = parseFloat(rawAmount.replace(/[^0-9.-]/g, '')) || 0
   }
-
-  // Warranty normalization
-  let warrantyStr = (data.warranty || '').toString().trim()
-  let returnDaysStr = (data.returnPolicy || data.returnDays || '').toString().trim()
 
   return {
     vendor: (data.vendor || '').toString().trim(),
@@ -179,12 +170,12 @@ function normalizeExtractedData(raw) {
     totalAmount: numericAmount > 0 ? numericAmount : (rawAmount ? String(rawAmount).trim() : ''),
     numericAmount,
     category: (data.category || 'General').toString().trim(),
-    warranty: warrantyStr,
-    returnPolicy: returnDaysStr
+    warranty: (data.warranty || '').toString().trim(),
+    returnPolicy: (data.returnPolicy || data.returnDays || '').toString().trim()
   }
 }
 
-// Main upload handler
+// Receipt upload handler
 async function handleUpload(req, res) {
   if (!req.file) {
     return res.status(400).json({
@@ -192,37 +183,35 @@ async function handleUpload(req, res) {
     })
   }
 
-  const filePath = req.file.path
-  console.log(`[Upload] Received receipt: ${req.file.originalname} (${req.file.size} bytes, ${req.file.mimetype})`)
+  const file = req.file
+
+  console.log(`[Upload] Received: ${file.originalname} (${file.size} bytes)`)
 
   try {
     let ocrText = ''
 
-    // Step 1: Run Google Cloud Vision OCR if configured
-    if (visionClient) {
+    // Step 1: Google Vision OCR
+    if (visionApiKey && file.mimetype !== 'application/pdf') {
       try {
-        console.log('[Vision] Performing OCR text detection...')
-        const [result] = await visionClient.textDetection(filePath)
-        ocrText = result?.fullTextAnnotation?.text || ''
-        console.log(`[Vision] Extracted ${ocrText.length} characters of OCR text.`)
-      } catch (visionErr) {
-        console.error('[Vision] OCR failed:', visionErr.message)
+        console.log('[Vision] Performing OCR...')
+
+        ocrText = await performVisionOCR(file.buffer, file.mimetype)
+
+        console.log(`[Vision] Extracted ${ocrText.length} characters.`)
+      } catch (err) {
+        console.error('[Vision] OCR failed:', err.message)
       }
     }
 
-    // Step 2: Use Gemini to extract structured receipt data
+    // Step 2: Gemini extraction
     let extractedData = null
 
     if (geminiModel) {
       try {
-        let aiResult = null
-
-        // If we have text from Vision, prompt with the OCR text
-        if (ocrText && ocrText.trim().length > 0) {
-          const prompt = `
+        const prompt = `
 You are a bill and receipt data extraction system.
 
-Extract structured information from the following OCR text.
+Extract structured information from the provided receipt.
 
 Return ONLY valid JSON in this exact format:
 
@@ -240,75 +229,60 @@ Return ONLY valid JSON in this exact format:
 Rules:
 - Do not invent information.
 - If a field is not present, use an empty string.
-- items should contain the product names found in the bill.
-- category should be a simple category such as Electronics, Food, Groceries, Fashion, Health, Travel, Other.
-
-OCR TEXT:
-${ocrText}
+- items should contain product names found in the bill.
+- category should be Electronics, Food, Groceries, Fashion, Health, Travel, or Other.
 `
-          console.log('[Gemini] Requesting structured extraction from OCR text...')
-          aiResult = await geminiModel.generateContent(prompt)
-        } else if (req.file.mimetype.startsWith('image/')) {
-          // Fallback: If Vision is unconfigured or returned no text, let Gemini multimodal read the image directly!
-          console.log('[Gemini] Reading receipt image directly via multimodal vision...')
-          const imageBuffer = fs.readFileSync(filePath)
-          const imagePart = {
+
+        let aiResult
+
+        if (ocrText.trim().length > 0) {
+          console.log('[Gemini] Extracting data from OCR text...')
+
+          aiResult = await geminiModel.generateContent(
+            `${prompt}\n\nOCR TEXT:\n${ocrText}`
+          )
+        } else {
+          console.log('[Gemini] Processing receipt file directly...')
+
+          const filePart = {
             inlineData: {
-              data: imageBuffer.toString('base64'),
-              mimeType: req.file.mimetype
+              data: file.buffer.toString('base64'),
+              mimeType: file.mimetype
             }
           }
-          const prompt = `
-You are a bill and receipt data extraction system.
-Extract structured information directly from this receipt image.
-Return ONLY valid JSON in this exact format:
-{
-  "vendor": "",
-  "invoiceNumber": "",
-  "date": "",
-  "items": [],
-  "totalAmount": "",
-  "category": "",
-  "warranty": "",
-  "returnPolicy": ""
-}
-Rules:
-- Do not invent information.
-- If a field is not present, use an empty string.
-- items should contain the product names found in the bill.
-- category should be a simple category such as Electronics, Food, Groceries, Fashion, Health, Travel, Other.
-`
-          aiResult = await geminiModel.generateContent([prompt, imagePart])
+
+          aiResult = await geminiModel.generateContent([
+            prompt,
+            filePart
+          ])
         }
 
-        if (aiResult) {
-          const aiResponseText = aiResult.response.text()
-          console.log('[Gemini] Raw AI Response received.')
-          const parsed = extractJsonFromText(aiResponseText)
-          if (parsed) {
-            extractedData = normalizeExtractedData(parsed)
-          } else {
-            console.warn('[Gemini] Could not parse AI response as JSON. Raw was:', aiResponseText)
-          }
+        const responseText = aiResult.response.text()
+        const parsed = extractJsonFromText(responseText)
+
+        if (parsed) {
+          extractedData = normalizeExtractedData(parsed)
+        } else {
+          console.warn('[Gemini] Could not parse response as JSON.')
         }
-      } catch (geminiErr) {
-        console.error('[Gemini] Extraction error:', geminiErr.message)
+      } catch (err) {
+        console.error('[Gemini] Extraction failed:', err.message)
       }
-    } else {
-      console.warn('[Backend] Gemini model is not configured.')
     }
 
-    // If both services failed or produced nothing, build fallback from filename
+    // Step 3: Fallback
     if (!extractedData) {
-      if (!visionClient && !geminiModel) {
+      if (!visionApiKey && !geminiModel) {
         return res.status(503).json({
-          error: 'OCR and AI extraction services are currently unconfigured on the server. Please verify GOOGLE_APPLICATION_CREDENTIALS and GEMINI_API_KEY.',
-          filename: req.file.originalname
+          error: 'OCR and AI extraction services are not configured.',
+          filename: file.originalname
         })
       }
 
-      // If one service failed, return what we have with a clean fallback
-      const cleanName = req.file.originalname.split('.')[0].replace(/[-_]/g, ' ')
+      const cleanName = file.originalname
+        .split('.')[0]
+        .replace(/[-_]/g, ' ')
+
       extractedData = normalizeExtractedData({
         vendor: cleanName.charAt(0).toUpperCase() + cleanName.slice(1),
         category: 'Other',
@@ -316,67 +290,56 @@ Rules:
       })
     }
 
-    res.json({
+    return res.json({
       message: 'Bill processed successfully',
-      filename: req.file.originalname,
+      filename: file.originalname,
       text: ocrText,
       extractedData
     })
+
   } catch (err) {
-    console.error('[Upload] Unexpected processing error:', err)
-    res.status(500).json({
+    console.error('[Upload] Processing error:', err)
+
+    return res.status(500).json({
       error: 'Failed to process receipt: ' + err.message
     })
-  } finally {
-    // ALWAYS clean up the temporary upload file to avoid leaking disk space
-    try {
-      if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath)
-        console.log(`[Upload] Cleaned up temporary file: ${filePath}`)
-      }
-    } catch (cleanupErr) {
-      console.warn('[Upload] Failed to clean up temp file:', cleanupErr.message)
-    }
   }
 }
 
-// Support both /upload and /api/upload
+// Upload routes
 app.post('/upload', upload.single('bill'), handleUpload)
 app.post('/api/upload', upload.single('bill'), handleUpload)
 
-// Error handling middleware for multer errors (like file size or type)
+// Multer error handling
 app.use((err, req, res, next) => {
   if (err instanceof multer.MulterError) {
     if (err.code === 'LIMIT_FILE_SIZE') {
-      return res.status(400).json({ error: 'Receipt file exceeds the 10MB size limit.' })
+      return res.status(400).json({
+        error: 'Receipt file exceeds the 4MB size limit.'
+      })
     }
-    return res.status(400).json({ error: `Upload error: ${err.message}` })
+
+    return res.status(400).json({
+      error: `Upload error: ${err.message}`
+    })
   }
+
   if (err) {
-    return res.status(400).json({ error: err.message || 'An error occurred during upload.' })
+    return res.status(400).json({
+      error: err.message || 'An upload error occurred.'
+    })
   }
+
   next()
 })
 
-// Start server with port conflict fallback
-const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`✓ BillStack backend running on port ${PORT}`)
-  console.log(`✓ Health endpoint: http://localhost:${PORT}/health`)
-})
+// Local development server
+if (require.main === module) {
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`BillStack backend running on port ${PORT}`)
+    console.log(`Health endpoint: http://localhost:${PORT}/health`)
+  })
+}
 
-server.on('error', (err) => {
-  if (err.code === 'EADDRINUSE') {
-    console.error(`[Error] Port ${PORT} is already in use.`)
-    if (PORT === 5000 || PORT === '5000') {
-      const fallbackPort = 5001
-      console.log(`Attempting fallback to port ${fallbackPort}...`)
-      app.listen(fallbackPort, '0.0.0.0', () => {
-        console.log(`✓ BillStack backend running on fallback port ${fallbackPort}`)
-      })
-    }
-  } else {
-    console.error('[Error] Server error:', err)
-  }
-})
-
+// Export for Vercel
 module.exports = app
